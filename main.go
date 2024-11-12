@@ -41,6 +41,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/davecgh/go-spew/spew"
 	excelize "github.com/xuri/excelize/v2"
@@ -85,6 +87,103 @@ type DonationTransation struct {
 }
 
 func main() {
+	GenerateDonationsByStudentReport()
+}
+
+func GenerateDonationsByStudentReport() {
+	f := excelize.NewFile()
+	defer func() {
+		if err := f.Close(); err != nil {
+			fmt.Println(err)
+		}
+	}()
+
+	sheetName := "Donations By Student"
+	i, err := f.NewSheet(sheetName)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	f.SetActiveSheet(i)
+
+	err = f.DeleteSheet("Sheet1")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	donationsByStudentHeader := []interface{}{
+		"Student",
+		"Class",
+		"Primary Donor 1",
+		"Primary Donor 2",
+		"Primary Donor 3",
+		"Primary Donors Per Student",
+		"Primary Donor 1 Donation Amount",
+		"Primary Donor 2 Donation Amount",
+		"Primary Donor 3 Donation Amount",
+		"Total Donation Amount",
+	}
+
+	style, err := f.NewStyle(&excelize.Style{
+		Font: &excelize.Font{
+			Size:   10,
+			Family: "Calibri",
+		},
+	})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	// Determine the desired range of cells to format.
+	// For instance, you might typically use only up to Z (column 26) and 100 rows.
+	maxColumns := 26
+	maxRows := 300
+
+	for col := 1; col <= maxColumns; col++ {
+		// colName, _ := excelize.ColumnNumberToName(col)
+		for row := 1; row <= maxRows; row++ {
+			cell, _ := excelize.CoordinatesToCellName(col, row)
+			if err := f.SetCellStyle(sheetName, cell, cell, style); err != nil {
+				fmt.Println(err)
+				return
+			}
+		}
+	}
+
+	//err = f.SetCellStyle(sheetName, "A1", "Z1", headerStyle)
+	//if err != nil {
+	//	fmt.Println(err)
+	//	return
+	//}
+
+	dollarAmountStyle, err := f.NewStyle(&excelize.Style{
+		NumFmt: 165,
+	})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	err = f.SetColStyle(sheetName, "G:J", dollarAmountStyle)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	err = f.SetSheetRow(sheetName, "A1", &donationsByStudentHeader)
+	if err != nil {
+		fmt.Println(err)
+		return
+
+	}
+
+	if err := f.SetColWidth(sheetName, "A", "A", 20); err != nil {
+		fmt.Println(err)
+	}
+
 	students, err := makeStudentRows()
 	if err != nil {
 		fmt.Println(err)
@@ -98,6 +197,80 @@ func main() {
 	}
 
 	assignDonationsToStudents(students, donations)
+
+	// data contains the rows to be written to the worksheet.
+	// This slice of interface slices is what the excelize
+	// library expects to write to the worksheet.
+	var data [][]interface{}
+
+	for _, student := range students {
+		data = append(data, []interface{}{
+			student.Name,
+			student.Class,
+			student.PrimaryDonor1,
+			student.PrimaryDonor2,
+			student.PrimaryDonor3,
+			student.PrimaryDonorsPerStudent,
+			student.PrimaryDonor1DonationAmount,
+			student.PrimaryDonor2DonationAmount,
+			student.PrimaryDonor3DonationAmount,
+			student.TotalDonationAmount,
+		})
+	}
+
+	for i := 2; i < (len(data) + 2); i++ {
+		err := f.SetSheetRow(sheetName, fmt.Sprintf("A%d", i), &data[i-2])
+		if err != nil {
+			fmt.Println(err)
+		}
+	}
+
+	// Resize cells to accomodate value lenghts
+	err = xlsAdjustColumnsWidth(f, sheetName)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	fileName := fmt.Sprintf("donations_by_student-%s.xlsx", time.Now().Format("2006-01-02"))
+	if err = f.SaveAs(fileName); err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	spew.Dump(students)
+
+	fmt.Printf("Donations by student report saved to %s\n", fileName)
+}
+
+// Auto adjust column width based on the content
+func xlsAdjustColumnsWidth(f *excelize.File, sheet string) error {
+	cols, err := f.GetCols(sheet)
+	if err != nil {
+		return err
+	}
+
+	for idx, col := range cols {
+		largestWidth := 0
+		for _, rowCell := range col {
+			cellWidth := utf8.RuneCountInString(rowCell)
+			// cellWidth := utf8.RuneCountInString(rowCell) + 2
+			if cellWidth > largestWidth {
+				largestWidth = cellWidth
+			}
+		}
+		name, err := excelize.ColumnNumberToName(idx + 1)
+		if err != nil {
+			return err
+		}
+
+		err = f.SetColWidth(sheet, name, name, float64(largestWidth))
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // assignDonationsToStudents distributes the donation amounts to the respective students based on the donation transactions
@@ -118,7 +291,7 @@ func assignDonationsToStudents(students AllStudents, donations []*DonationTransa
 
 		donationPerStudent := parseDollarAmount(txn.Amount) / float64(len(validSiblings))
 
-		//fmt.Println("Donation per student:", donationPerStudent, txn.Amount, float64(len(validSiblings)))
+		// fmt.Println("Donation per student:", donationPerStudent, txn.Amount, float64(len(validSiblings)))
 
 		// Update each student's donation information
 		for _, sibling := range validSiblings {
