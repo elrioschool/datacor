@@ -116,6 +116,9 @@ func GenerateDonationsByStudentReport() {
 	donationsByStudentHeader := []interface{}{
 		"Student",
 		"Class",
+		"Care Giver 1",
+		"Care Giver 2",
+		"Care Giver 3",
 		"Primary Donor 1",
 		"Primary Donor 2",
 		"Primary Donor 3",
@@ -167,7 +170,7 @@ func GenerateDonationsByStudentReport() {
 		return
 	}
 
-	err = f.SetColStyle(sheetName, "G:J", dollarAmountStyle)
+	err = f.SetColStyle(sheetName, "J:M", dollarAmountStyle)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -207,6 +210,9 @@ func GenerateDonationsByStudentReport() {
 		data = append(data, []interface{}{
 			student.Name,
 			student.Class,
+			student.Parent1,
+			student.Parent2,
+			student.Parent3,
 			student.PrimaryDonor1,
 			student.PrimaryDonor2,
 			student.PrimaryDonor3,
@@ -464,6 +470,7 @@ func getParents() ([]*Parent, error) {
 }
 
 func readTransactions() ([]*DonationTransation, error) {
+	// fileName := "2024-11-12-donation-transactions.xlsx"
 	fileName := "Watershed_donors_kids_&_class_names_previous_31_days.xlsx"
 	f, err := excelize.OpenFile(fileName)
 	if err != nil {
