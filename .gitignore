@@ -27,3 +27,5 @@ go.work.sum
 # Excel spreadsheet files
 *.xlsx
 
+# Self binary
+datacor

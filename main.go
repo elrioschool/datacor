@@ -1,6 +1,6 @@
 // MIT License
 //
-// Copyright (c) 2024 [JR Camou <jr@camou.org>]
+// Copyright (c) 2024 [El Rio Community School]
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -39,12 +39,12 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
-	"github.com/davecgh/go-spew/spew"
 	excelize "github.com/xuri/excelize/v2"
 )
 
@@ -87,6 +87,21 @@ type DonationTransation struct {
 }
 
 func main() {
+	if len(os.Args) < 2 {
+		fmt.Printf("Usage: %s <transactions-file>\n", os.Args[0])
+		os.Exit(1)
+	}
+
+	if _, err := os.Stat(os.Args[1]); os.IsNotExist(err) {
+		fmt.Printf("File does not exist: %s\n", os.Args[1])
+		os.Exit(1)
+	}
+
+	if !strings.HasSuffix(strings.ToLower(os.Args[1]), ".xlsx") {
+		fmt.Printf("Transactions file must have an .xlsx extension\n")
+		os.Exit(1)
+	}
+
 	GenerateDonationsByStudentReport()
 }
 
@@ -155,12 +170,6 @@ func GenerateDonationsByStudentReport() {
 			}
 		}
 	}
-
-	//err = f.SetCellStyle(sheetName, "A1", "Z1", headerStyle)
-	//if err != nil {
-	//	fmt.Println(err)
-	//	return
-	//}
 
 	dollarAmountStyle, err := f.NewStyle(&excelize.Style{
 		NumFmt: 165,
@@ -243,8 +252,6 @@ func GenerateDonationsByStudentReport() {
 		fmt.Println(err)
 		return
 	}
-
-	spew.Dump(students)
 
 	fmt.Printf("Donations by student report saved to %s\n", fileName)
 }
@@ -346,8 +353,6 @@ func assignDonationsToStudents(students AllStudents, donations []*DonationTransa
 		}
 
 	}
-
-	spew.Dump(students)
 }
 
 // parseDollarAmount takes a string formatted as a dollar amount (e.g., "$10.00")
@@ -384,8 +389,6 @@ func makeStudentRows() (map[string]Student, error) {
 			}
 		}
 	}
-
-	// spew.Dump(students)
 
 	return students, nil
 }
@@ -470,9 +473,7 @@ func getParents() ([]*Parent, error) {
 }
 
 func readTransactions() ([]*DonationTransation, error) {
-	// fileName := "2024-11-12-donation-transactions.xlsx"
-	fileName := "Watershed_donors_kids_&_class_names_previous_31_days.xlsx"
-	f, err := excelize.OpenFile(fileName)
+	f, err := excelize.OpenFile(os.Args[1])
 	if err != nil {
 		fmt.Println(err)
 		return nil, err
