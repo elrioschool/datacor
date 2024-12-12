@@ -247,6 +247,63 @@ func GenerateDonationsByStudentReport() {
 		return
 	}
 
+	// Write non care giver donations to the worksheet (separate sheet)
+	nonCareGiverDonationsSheetName := "Non Care Giver Donations"
+
+	i, err = f.NewSheet(nonCareGiverDonationsSheetName)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	f.SetActiveSheet(i)
+
+	nonCareGiverDonationsHeader := []interface{}{
+		"Date",
+		"Name",
+		"Amount",
+	}
+
+	err = f.SetSheetRow(nonCareGiverDonationsSheetName, "A1", &nonCareGiverDonationsHeader)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	nonCareGiverDonations, err := readTransactionsByNonCareGivers()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	var nonCareGiverDonationsData [][]interface{}
+
+	for _, donation := range nonCareGiverDonations {
+		nonCareGiverDonationsData = append(nonCareGiverDonationsData, []interface{}{
+			donation.Date,
+			donation.Name,
+			donation.Amount,
+		})
+	}
+
+	for i := 2; i < (len(nonCareGiverDonationsData) + 2); i++ {
+		err := f.SetSheetRow(
+			nonCareGiverDonationsSheetName,
+			fmt.Sprintf("A%d", i),
+			&nonCareGiverDonationsData[i-2],
+		)
+		if err != nil {
+			fmt.Println(err)
+		}
+	}
+
+	// Resize cells to accomodate value lenghts
+	err = xlsAdjustColumnsWidth(f, nonCareGiverDonationsSheetName)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
 	fileName := fmt.Sprintf("donations_by_student-%s.xlsx", time.Now().Format("2006-01-02"))
 	if err = f.SaveAs(fileName); err != nil {
 		fmt.Println(err)
@@ -504,6 +561,52 @@ func readTransactions() ([]*DonationTransation, error) {
 			ThirdStudentName:   row[10],
 			ThirdStudentClass:  row[11],
 			AccountNumber:      row[12],
+		}
+
+		donations = append(donations, txn)
+
+	}
+
+	return donations, nil
+}
+
+func readTransactionsByNonCareGivers() ([]*DonationTransation, error) {
+	f, err := excelize.OpenFile(os.Args[1])
+	if err != nil {
+		fmt.Println(err)
+		return nil, err
+	}
+
+	rows, err := f.GetRows("Data")
+	if err != nil {
+		fmt.Println(err)
+		return nil, err
+	}
+
+	var donations []*DonationTransation
+
+	for rowIndex, row := range rows {
+		// Skip header and total rows
+		if rowIndex == 0 || rowIndex == 1 {
+			continue
+		}
+
+		// Ignore transactions with students associated with them
+		if row[6] != "" {
+			continue
+		}
+		if row[8] != "" {
+			continue
+		}
+		if row[10] != "" {
+			continue
+		}
+
+		txn := &DonationTransation{
+			Date:          row[0],
+			Name:          row[1],
+			Amount:        strings.ReplaceAll(row[2], " ", ""),
+			AccountNumber: row[12],
 		}
 
 		donations = append(donations, txn)
