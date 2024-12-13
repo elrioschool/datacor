@@ -1,6 +1,6 @@
 // FILE: main_test.go
 
-package main
+package donationsbystudent
 
 import (
 	"testing"

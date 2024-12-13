@@ -35,16 +35,21 @@
 // data. The transaction data is then mapped to the students and their respective
 // primary donors.
 
-package main
+package donationsbystudent
 
 import (
+	"bytes"
+	"context"
 	"fmt"
-	"os"
+	"io"
+	"regexp"
 	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 
+	"cloud.google.com/go/storage"
+	"github.com/GoogleCloudPlatform/functions-framework-go/functions"
+	"github.com/cloudevents/sdk-go/v2/event"
 	excelize "github.com/xuri/excelize/v2"
 )
 
@@ -86,26 +91,60 @@ type DonationTransation struct {
 	AccountNumber      string
 }
 
-func main() {
-	if len(os.Args) < 2 {
-		fmt.Printf("Usage: %s <transactions-file>\n", os.Args[0])
-		os.Exit(1)
-	}
-
-	if _, err := os.Stat(os.Args[1]); os.IsNotExist(err) {
-		fmt.Printf("File does not exist: %s\n", os.Args[1])
-		os.Exit(1)
-	}
-
-	if !strings.HasSuffix(strings.ToLower(os.Args[1]), ".xlsx") {
-		fmt.Printf("Transactions file must have an .xlsx extension\n")
-		os.Exit(1)
-	}
-
-	GenerateDonationsByStudentReport()
+// StorageObjectData contains metadata of the Cloud Storage object.
+type StorageObjectData struct {
+	Bucket string `json:"bucket,omitempty"`
+	Name   string `json:"name,omitempty"`
 }
 
-func GenerateDonationsByStudentReport() {
+// Global variables populated by generateDonationsByStudentReport
+var (
+	bucket     string = ""
+	txnsFile   string = ""
+	outputFile string = ""
+)
+
+func init() {
+	functions.CloudEvent("GenerateDonationsByStudentReport", generateDonationsByStudentReport)
+}
+
+// generateDonationsByStudentReport is the entrypoint for the Cloud Function
+func generateDonationsByStudentReport(ctx context.Context, e event.Event) error {
+	// data contains the metadata of the event that triggered the function.
+	var data StorageObjectData
+	if err := e.DataAs(&data); err != nil {
+		return fmt.Errorf("event.DataAs: %v", err)
+	}
+
+	bucket = data.Bucket
+	txnsFile = data.Name
+
+	// The object name triggering the function should match
+	// this format: 2024-12-12-Report.xlsx
+	pattern := `^\d{4}-\d{2}-\d{2}-Report\.xlsx$`
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return err
+	}
+
+	if !re.MatchString(txnsFile) {
+		return fmt.Errorf("Stopping execution, don't know what to do with object %s", txnsFile)
+	}
+
+	reportDate := strings.Split(txnsFile, "-")
+	outputFile = fmt.Sprintf(
+		"donations_by_student-%s-%s-%s.xlsx",
+		reportDate[0],
+		reportDate[1],
+		reportDate[2],
+	)
+
+	run()
+
+	return nil
+}
+
+func run() {
 	f := excelize.NewFile()
 	defer func() {
 		if err := f.Close(); err != nil {
@@ -304,13 +343,58 @@ func GenerateDonationsByStudentReport() {
 		return
 	}
 
-	fileName := fmt.Sprintf("donations_by_student-%s.xlsx", time.Now().Format("2006-01-02"))
-	if err = f.SaveAs(fileName); err != nil {
+	if err = writeBucketObject(bucket, outputFile, f); err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	fmt.Printf("Donations by student report saved to %s\n", fileName)
+	fmt.Printf("Donations by student report saved to %s\n", outputFile)
+
+	// Clean up: delete the transaction file
+	if err := deleteBucketObject(bucket, txnsFile); err != nil {
+		fmt.Printf("Failed to delete transaction file %s: %v", txnsFile, err)
+	}
+}
+
+// writeBucketObject writes a file to a Google Cloud Storage bucket
+func writeBucketObject(bucketName, objectName string, f *excelize.File) error {
+	var buf bytes.Buffer
+	if err := f.Write(&buf); err != nil {
+		// fmt.Printf("Failed to write file to buffer: %v", err)
+		return err
+	}
+
+	ctx := context.Background()
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return err
+	}
+
+	w := client.Bucket(bucketName).Object(objectName).NewWriter(ctx)
+	w.ContentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+	defer w.Close()
+
+	if _, err := buf.WriteTo(w); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// deleteBucketObject deletes a file from a Google Cloud Storage bucket
+func deleteBucketObject(bucketName, objectName string) error {
+	ctx := context.Background()
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return err
+	}
+
+	if err := client.Bucket(bucketName).Object(objectName).Delete(ctx); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Auto adjust column width based on the content
@@ -464,11 +548,43 @@ func addParent(student *Student, parentName string) {
 	}
 }
 
+// getFileFromBucket reads a file from a Google Cloud Storage bucket
+// and returns the file as a byte slice.  The bucket name and file
+// name are passed as arguments.
+func getFileFromBucket(bucketName, fileName string) (*bytes.Reader, error) {
+	ctx := context.Background()
+	client, err := storage.NewClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	rc, err := client.Bucket(bucketName).Object(fileName).NewReader(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	blob, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	return bytes.NewReader(blob), nil
+}
+
 // getParents reads the parent-child data from an Excel spreadsheet
 func getParents() ([]*Parent, error) {
-	// TODO: parameterize the file name
+	// Name of the master parents and kids file to be loaded from the
+	// storage bucket.  If this file doesn't exist then this program
+	// has nothing to do and will exist with a relevant message.
 	fileName := "parents-kids-classes.xlsx"
-	f, err := excelize.OpenFile(fileName)
+
+	reader, err := getFileFromBucket(bucket, fileName)
+	if err != nil {
+		return nil, err
+	}
+
+	f, err := excelize.OpenReader(reader)
 	if err != nil {
 		fmt.Println(err)
 		return nil, err
@@ -530,7 +646,13 @@ func getParents() ([]*Parent, error) {
 }
 
 func readTransactions() ([]*DonationTransation, error) {
-	f, err := excelize.OpenFile(os.Args[1])
+	reader, err := getFileFromBucket(bucket, txnsFile)
+	if err != nil {
+		return nil, err
+	}
+
+	f, err := excelize.OpenReader(reader)
+	// f, err := excelize.OpenFile(os.Args[1])
 	if err != nil {
 		fmt.Println(err)
 		return nil, err
@@ -571,7 +693,13 @@ func readTransactions() ([]*DonationTransation, error) {
 }
 
 func readTransactionsByNonCareGivers() ([]*DonationTransation, error) {
-	f, err := excelize.OpenFile(os.Args[1])
+	reader, err := getFileFromBucket(bucket, txnsFile)
+	if err != nil {
+		return nil, err
+	}
+
+	f, err := excelize.OpenReader(reader)
+	// f, err := excelize.OpenFile(os.Args[1])
 	if err != nil {
 		fmt.Println(err)
 		return nil, err
