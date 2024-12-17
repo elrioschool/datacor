@@ -50,6 +50,7 @@ import (
 	"cloud.google.com/go/storage"
 	"github.com/GoogleCloudPlatform/functions-framework-go/functions"
 	"github.com/cloudevents/sdk-go/v2/event"
+	"github.com/jotacamou/datacor/internal/misc"
 	excelize "github.com/xuri/excelize/v2"
 )
 
@@ -224,11 +225,36 @@ func run() {
 		return
 	}
 
-	err = f.SetSheetRow(sheetName, "A1", &donationsByStudentHeader)
+	err = f.SetCellValue(sheetName, "A1", "Last Updated:")
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	// Create a new style with a yellow background.
+	dateStyle, err := f.NewStyle(&excelize.Style{
+		Fill: excelize.Fill{
+			Type:    "pattern",
+			Color:   []string{"#FFFF00"}, // Yellow color in HEX format
+			Pattern: 1,
+		},
+	})
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	err = f.SetCellStyle(sheetName, "B1", "B1", dateStyle)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	err = f.SetSheetRow(sheetName, "A2", &donationsByStudentHeader)
 	if err != nil {
 		fmt.Println(err)
 		return
-
+	}
+	err = f.SetCellValue(sheetName, "B1", misc.DateFromFileName(txnsFile))
+	if err != nil {
+		fmt.Println(err)
 	}
 
 	if err := f.SetColWidth(sheetName, "A", "A", 20); err != nil {
@@ -272,7 +298,7 @@ func run() {
 		})
 	}
 
-	for i := 2; i < (len(data) + 2); i++ {
+	for i := 3; i < (len(data) + 2); i++ {
 		err := f.SetSheetRow(sheetName, fmt.Sprintf("A%d", i), &data[i-2])
 		if err != nil {
 			fmt.Println(err)
