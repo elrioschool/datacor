@@ -35,51 +35,25 @@
 // data. The transaction data is then mapped to the students and their respective
 // primary donors.
 
-package donationsbystudent
+package main
 
 import (
-	"bytes"
-	"context"
 	"fmt"
-	"io"
-	"regexp"
+	"os"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
-	"cloud.google.com/go/storage"
-	"github.com/GoogleCloudPlatform/functions-framework-go/functions"
-	"github.com/cloudevents/sdk-go/v2/event"
-	"github.com/jotacamou/datacor/internal/misc"
+	"github.com/jotacamou/datacor/internal/runctx"
+	"github.com/jotacamou/datacor/internal/types"
+
 	excelize "github.com/xuri/excelize/v2"
 )
 
-type Parent struct {
-	Name          string
-	Children      []Student
-	AccountNumber string
-}
+type AllStudents map[string]types.Student
 
-type Student struct {
-	Name                        string
-	Grade                       string
-	Class                       string
-	Parent1                     string
-	Parent2                     string
-	Parent3                     string
-	PrimaryDonor1               string
-	PrimaryDonor2               string
-	PrimaryDonor3               string
-	PrimaryDonorsPerStudent     int
-	PrimaryDonor1DonationAmount float64
-	PrimaryDonor2DonationAmount float64
-	PrimaryDonor3DonationAmount float64
-	TotalDonationAmount         float64
-}
-
-type AllStudents map[string]Student
-
-type DonationTransation struct {
+type DonationTransaction struct {
 	Date               string
 	Name               string
 	Amount             string
@@ -92,60 +66,32 @@ type DonationTransation struct {
 	AccountNumber      string
 }
 
-// StorageObjectData contains metadata of the Cloud Storage object.
-type StorageObjectData struct {
-	Bucket string `json:"bucket,omitempty"`
-	Name   string `json:"name,omitempty"`
-}
+var context *runctx.RunContext = new(runctx.RunContext)
 
-// Global variables populated by generateDonationsByStudentReport
-var (
-	bucket     string = ""
-	txnsFile   string = ""
-	outputFile string = ""
-)
-
-func init() {
-	functions.CloudEvent("GenerateDonationsByStudentReport", generateDonationsByStudentReport)
-}
-
-// generateDonationsByStudentReport is the entrypoint for the Cloud Function
-func generateDonationsByStudentReport(ctx context.Context, e event.Event) error {
-	// data contains the metadata of the event that triggered the function.
-	var data StorageObjectData
-	if err := e.DataAs(&data); err != nil {
-		return fmt.Errorf("event.DataAs: %v", err)
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Printf("Usage: %s <transactions-file>\n", os.Args[0])
+		os.Exit(1)
 	}
 
-	bucket = data.Bucket
-	txnsFile = data.Name
+	context.NewTxnReport = os.Args[1]
 
-	// The object name triggering the function should match
-	// this format: 2024-12-12-Report.xlsx
-	pattern := `^\d{4}-\d{2}-\d{2}-Report\.xlsx$`
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return err
+	fmt.Println(context.NewTxnReport)
+	fmt.Println(context.GetNewReportDate())
+	if _, err := os.Stat(os.Args[1]); os.IsNotExist(err) {
+		fmt.Printf("File does not exist: %s\n", context.NewTxnReport)
+		os.Exit(1)
 	}
 
-	if !re.MatchString(txnsFile) {
-		return fmt.Errorf("Stopping execution, don't know what to do with object %s", txnsFile)
+	if !strings.HasSuffix(strings.ToLower(os.Args[1]), ".xlsx") {
+		fmt.Printf("Transactions file must have an .xlsx extension\n")
+		os.Exit(1)
 	}
 
-	reportDate := strings.Split(txnsFile, "-")
-	outputFile = fmt.Sprintf(
-		"donations_by_student-%s-%s-%s.xlsx",
-		reportDate[0],
-		reportDate[1],
-		reportDate[2],
-	)
-
-	run()
-
-	return nil
+	GenerateDonationsByStudentReport()
 }
 
-func run() {
+func GenerateDonationsByStudentReport() {
 	f := excelize.NewFile()
 	defer func() {
 		if err := f.Close(); err != nil {
@@ -246,15 +192,16 @@ func run() {
 	if err != nil {
 		fmt.Println(err)
 	}
+	err = f.SetCellValue(sheetName, "B1", context.GetNewReportDate())
+	if err != nil {
+		fmt.Println(err)
+	}
 
 	err = f.SetSheetRow(sheetName, "A2", &donationsByStudentHeader)
 	if err != nil {
 		fmt.Println(err)
 		return
-	}
-	err = f.SetCellValue(sheetName, "B1", misc.DateFromFileName(txnsFile))
-	if err != nil {
-		fmt.Println(err)
+
 	}
 
 	if err := f.SetColWidth(sheetName, "A", "A", 20); err != nil {
@@ -369,58 +316,13 @@ func run() {
 		return
 	}
 
-	if err = writeBucketObject(bucket, outputFile, f); err != nil {
+	fileName := fmt.Sprintf("donations_by_student-%s.xlsx", time.Now().Format("2006-01-02"))
+	if err = f.SaveAs(fileName); err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	fmt.Printf("Donations by student report saved to %s\n", outputFile)
-
-	// Clean up: delete the transaction file
-	if err := deleteBucketObject(bucket, txnsFile); err != nil {
-		fmt.Printf("Failed to delete transaction file %s: %v", txnsFile, err)
-	}
-}
-
-// writeBucketObject writes a file to a Google Cloud Storage bucket
-func writeBucketObject(bucketName, objectName string, f *excelize.File) error {
-	var buf bytes.Buffer
-	if err := f.Write(&buf); err != nil {
-		// fmt.Printf("Failed to write file to buffer: %v", err)
-		return err
-	}
-
-	ctx := context.Background()
-	client, err := storage.NewClient(ctx)
-	if err != nil {
-		return err
-	}
-
-	w := client.Bucket(bucketName).Object(objectName).NewWriter(ctx)
-	w.ContentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-
-	defer w.Close()
-
-	if _, err := buf.WriteTo(w); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// deleteBucketObject deletes a file from a Google Cloud Storage bucket
-func deleteBucketObject(bucketName, objectName string) error {
-	ctx := context.Background()
-	client, err := storage.NewClient(ctx)
-	if err != nil {
-		return err
-	}
-
-	if err := client.Bucket(bucketName).Object(objectName).Delete(ctx); err != nil {
-		return err
-	}
-
-	return nil
+	fmt.Printf("Donations by student report saved to %s\n", fileName)
 }
 
 // Auto adjust column width based on the content
@@ -454,7 +356,7 @@ func xlsAdjustColumnsWidth(f *excelize.File, sheet string) error {
 }
 
 // assignDonationsToStudents distributes the donation amounts to the respective students based on the donation transactions
-func assignDonationsToStudents(students AllStudents, donations []*DonationTransation) {
+func assignDonationsToStudents(students AllStudents, donations []*types.DonationTransaction) {
 	for _, txn := range donations {
 		siblings := []string{txn.FirstStudentName, txn.SecondStudentName, txn.ThirdStudentName}
 		validSiblings := []string{}
@@ -536,7 +438,7 @@ func parseDollarAmount(amount string) float64 {
 	return value
 }
 
-func makeStudentRows() (map[string]Student, error) {
+func makeStudentRows() (map[string]types.Student, error) {
 	parents, err := getParents()
 	if err != nil {
 		fmt.Println(err)
@@ -560,7 +462,7 @@ func makeStudentRows() (map[string]Student, error) {
 	return students, nil
 }
 
-func addParent(student *Student, parentName string) {
+func addParent(student *types.Student, parentName string) {
 	parents := []*string{
 		&student.Parent1,
 		&student.Parent2,
@@ -574,43 +476,11 @@ func addParent(student *Student, parentName string) {
 	}
 }
 
-// getFileFromBucket reads a file from a Google Cloud Storage bucket
-// and returns the file as a byte slice.  The bucket name and file
-// name are passed as arguments.
-func getFileFromBucket(bucketName, fileName string) (*bytes.Reader, error) {
-	ctx := context.Background()
-	client, err := storage.NewClient(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	rc, err := client.Bucket(bucketName).Object(fileName).NewReader(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	blob, err := io.ReadAll(rc)
-	rc.Close()
-	if err != nil {
-		return nil, err
-	}
-
-	return bytes.NewReader(blob), nil
-}
-
 // getParents reads the parent-child data from an Excel spreadsheet
-func getParents() ([]*Parent, error) {
-	// Name of the master parents and kids file to be loaded from the
-	// storage bucket.  If this file doesn't exist then this program
-	// has nothing to do and will exist with a relevant message.
+func getParents() ([]*types.Parent, error) {
+	// TODO: parameterize the file name
 	fileName := "parents-kids-classes.xlsx"
-
-	reader, err := getFileFromBucket(bucket, fileName)
-	if err != nil {
-		return nil, err
-	}
-
-	f, err := excelize.OpenReader(reader)
+	f, err := excelize.OpenFile(fileName)
 	if err != nil {
 		fmt.Println(err)
 		return nil, err
@@ -622,7 +492,7 @@ func getParents() ([]*Parent, error) {
 		return nil, err
 	}
 
-	var parents []*Parent
+	var parents []*types.Parent
 
 	for rowIndex, row := range rows {
 		// Skip the header row
@@ -637,9 +507,9 @@ func getParents() ([]*Parent, error) {
 		firstChildName := row[1]
 		firstChildClass := row[2]
 
-		parent := &Parent{
+		parent := &types.Parent{
 			Name: parentName,
-			Children: []Student{
+			Children: []types.Student{
 				{ // First child
 					Name:  firstChildName,
 					Class: firstChildClass,
@@ -650,7 +520,7 @@ func getParents() ([]*Parent, error) {
 
 		// Check if parent has a second children
 		if row[3] != "" {
-			parent.Children = append(parent.Children, Student{
+			parent.Children = append(parent.Children, types.Student{
 				Name:  row[3],
 				Class: row[4],
 			})
@@ -658,7 +528,7 @@ func getParents() ([]*Parent, error) {
 
 		// Check if parent has a third children, only likely if they have a second child
 		if row[5] != "" {
-			parent.Children = append(parent.Children, Student{
+			parent.Children = append(parent.Children, types.Student{
 				Name:  row[5],
 				Class: row[6],
 			})
@@ -671,14 +541,8 @@ func getParents() ([]*Parent, error) {
 	return parents, nil
 }
 
-func readTransactions() ([]*DonationTransation, error) {
-	reader, err := getFileFromBucket(bucket, txnsFile)
-	if err != nil {
-		return nil, err
-	}
-
-	f, err := excelize.OpenReader(reader)
-	// f, err := excelize.OpenFile(os.Args[1])
+func readTransactions() ([]*types.DonationTransaction, error) {
+	f, err := excelize.OpenFile(os.Args[1])
 	if err != nil {
 		fmt.Println(err)
 		return nil, err
@@ -690,7 +554,7 @@ func readTransactions() ([]*DonationTransation, error) {
 		return nil, err
 	}
 
-	var donations []*DonationTransation
+	var donations []*types.DonationTransaction
 
 	for rowIndex, row := range rows {
 		// Skip header and total rows
@@ -698,7 +562,7 @@ func readTransactions() ([]*DonationTransation, error) {
 			continue
 		}
 
-		txn := &DonationTransation{
+		txn := &types.DonationTransaction{
 			Date:               row[0],
 			Name:               row[1],
 			Amount:             strings.ReplaceAll(row[2], " ", ""),
@@ -718,14 +582,8 @@ func readTransactions() ([]*DonationTransation, error) {
 	return donations, nil
 }
 
-func readTransactionsByNonCareGivers() ([]*DonationTransation, error) {
-	reader, err := getFileFromBucket(bucket, txnsFile)
-	if err != nil {
-		return nil, err
-	}
-
-	f, err := excelize.OpenReader(reader)
-	// f, err := excelize.OpenFile(os.Args[1])
+func readTransactionsByNonCareGivers() ([]*types.DonationTransaction, error) {
+	f, err := excelize.OpenFile(os.Args[1])
 	if err != nil {
 		fmt.Println(err)
 		return nil, err
@@ -737,7 +595,7 @@ func readTransactionsByNonCareGivers() ([]*DonationTransation, error) {
 		return nil, err
 	}
 
-	var donations []*DonationTransation
+	var donations []*types.DonationTransaction
 
 	for rowIndex, row := range rows {
 		// Skip header and total rows
@@ -756,7 +614,7 @@ func readTransactionsByNonCareGivers() ([]*DonationTransation, error) {
 			continue
 		}
 
-		txn := &DonationTransation{
+		txn := &types.DonationTransaction{
 			Date:          row[0],
 			Name:          row[1],
 			Amount:        strings.ReplaceAll(row[2], " ", ""),
