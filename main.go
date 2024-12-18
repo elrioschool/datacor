@@ -298,8 +298,8 @@ func run() {
 		})
 	}
 
-	for i := 3; i < (len(data) + 2); i++ {
-		err := f.SetSheetRow(sheetName, fmt.Sprintf("A%d", i), &data[i-2])
+	for i := 3; i < (len(data) + 3); i++ {
+		err := f.SetSheetRow(sheetName, fmt.Sprintf("A%d", i), &data[i-3])
 		if err != nil {
 			fmt.Println(err)
 		}
